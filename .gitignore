@@ -1,0 +1,13 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.coverage
+data/dataspace.db
+data/keys/*.pem
+data/keys/*.pub
+*.log
