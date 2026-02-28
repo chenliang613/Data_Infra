@@ -13,6 +13,7 @@ import mimetypes
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 import httpx
 import uvicorn
@@ -48,12 +49,16 @@ app = FastAPI(title=AGENT_NAME)
 # ── Pydantic 模型 ─────────────────────────────────────────────────────────────
 class ConnectRequest(BaseModel):
     endpoint: str
+    trust_level: str = "high"   # "high" | "normal"
+    message: str = ""
 
 
 class TrustPayload(BaseModel):
     agent_id: str
     name: str
     endpoint: str
+    trust_level: str = "high"
+    message: str = ""
 
 
 # ── 用户侧 API ────────────────────────────────────────────────────────────────
@@ -118,8 +123,7 @@ async def download_shared(file_id: str):
 async def delete_shared(file_id: str):
     if file_id not in shared_files:
         raise HTTPException(404, "文件不存在")
-    info = shared_files.pop(file_id)
-    Path(info["path"]).unlink(missing_ok=True)
+    shared_files.pop(file_id)
     return {"ok": True}
 
 
@@ -173,11 +177,14 @@ async def list_peers():
 
 @app.post("/api/peers/connect")
 async def connect_to_peer(body: ConnectRequest):
+    body.endpoint = body.endpoint.rstrip("/")
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
                 f"{body.endpoint}/internal/trust-request",
-                json={"agent_id": AGENT_ID, "name": AGENT_NAME, "endpoint": ENDPOINT},
+                json={"agent_id": AGENT_ID, "name": AGENT_NAME,
+                      "endpoint": ENDPOINT, "trust_level": body.trust_level,
+                      "message": body.message},
                 timeout=5,
             )
             resp.raise_for_status()
@@ -193,6 +200,7 @@ async def connect_to_peer(body: ConnectRequest):
         "name": peer_info["name"],
         "endpoint": body.endpoint,
         "status": "pending_out",
+        "trust_level": body.trust_level,
     }
     return peers[peer_id]
 
@@ -206,7 +214,8 @@ async def accept_peer(peer_id: str):
         try:
             await client.post(
                 f"{peer['endpoint']}/internal/trust-accepted",
-                json={"agent_id": AGENT_ID, "name": AGENT_NAME, "endpoint": ENDPOINT},
+                json={"agent_id": AGENT_ID, "name": AGENT_NAME,
+                      "endpoint": ENDPOINT, "trust_level": peer.get("trust_level", "high")},
                 timeout=5,
             )
         except Exception as e:
@@ -219,8 +228,45 @@ async def accept_peer(peer_id: str):
 async def reject_peer(peer_id: str):
     if peer_id not in peers:
         raise HTTPException(404, "节点不存在")
-    peers.pop(peer_id)
+    peer = peers.pop(peer_id)
+    # 通知对方已拒绝
+    async with httpx.AsyncClient() as client:
+        try:
+            await client.post(
+                f"{peer['endpoint']}/internal/trust-rejected",
+                json={"agent_id": AGENT_ID, "name": AGENT_NAME, "endpoint": ENDPOINT},
+                timeout=5,
+            )
+        except Exception:
+            pass  # 通知失败不影响本方操作
     return {"ok": True}
+
+
+@app.delete("/api/peers/{peer_id}")
+async def remove_peer(peer_id: str):
+    peers.pop(peer_id, None)
+    return {"ok": True}
+
+
+@app.get("/api/peers/{peer_id}/proxy/{file_id}")
+async def proxy_peer_preview(peer_id: str, file_id: str):
+    """代理预览对方节点的共享文件 — 任意互信等级均可。"""
+    if peer_id not in peers or peers[peer_id]["status"] != "trusted":
+        raise HTTPException(403, "该节点未建立互信")
+    peer = peers[peer_id]
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(
+                f"{peer['endpoint']}/internal/preview/{file_id}",
+                params={"from_id": AGENT_ID},
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            raise HTTPException(400, f"预览失败: {e}")
+    from fastapi.responses import Response
+    mime = resp.headers.get("content-type", "application/octet-stream")
+    return Response(content=resp.content, media_type=mime)
 
 
 @app.get("/api/peers/{peer_id}/files")
@@ -245,6 +291,8 @@ async def browse_peer_files(peer_id: str):
 async def fetch_file(peer_id: str, file_id: str):
     if peer_id not in peers or peers[peer_id]["status"] != "trusted":
         raise HTTPException(403, "该节点未建立互信")
+    if peers[peer_id].get("trust_level", "high") != "high":
+        raise HTTPException(403, "仅高互信节点可下载文件")
     peer = peers[peer_id]
     async with httpx.AsyncClient() as client:
         try:
@@ -257,7 +305,7 @@ async def fetch_file(peer_id: str, file_id: str):
         except Exception as e:
             raise HTTPException(400, f"获取文件失败: {e}")
 
-    filename = resp.headers.get("x-filename", file_id)
+    filename = unquote(resp.headers.get("x-filename", file_id))
     dest = RECEIVED_DIR / filename
     if dest.exists():
         stem, suffix = dest.stem, dest.suffix
@@ -285,8 +333,18 @@ async def receive_trust_request(body: TrustPayload):
         "name": body.name,
         "endpoint": body.endpoint,
         "status": "pending_in",
+        "trust_level": body.trust_level,
+        "message": body.message,
     }
     return {"agent_id": AGENT_ID, "name": AGENT_NAME, "endpoint": ENDPOINT}
+
+
+@app.post("/internal/trust-rejected")
+async def receive_trust_rejected(body: TrustPayload):
+    """接收对方的拒绝通知，将其标记为 rejected。"""
+    if body.agent_id in peers:
+        peers[body.agent_id]["status"] = "rejected"
+    return {"ok": True}
 
 
 @app.post("/internal/trust-accepted")
@@ -296,6 +354,7 @@ async def receive_trust_accepted(body: TrustPayload):
         "name": body.name,
         "endpoint": body.endpoint,
         "status": "trusted",
+        "trust_level": body.trust_level,
     }
     return {"ok": True}
 
@@ -307,17 +366,31 @@ async def internal_list_shared(from_id: str):
     return list(shared_files.values())
 
 
+@app.get("/internal/preview/{file_id}")
+async def internal_preview_file(file_id: str, from_id: str):
+    """内联预览文件 — 任意互信等级均可访问。"""
+    if from_id not in peers or peers[from_id]["status"] != "trusted":
+        raise HTTPException(403, "未建立互信")
+    if file_id not in shared_files:
+        raise HTTPException(404, "文件不存在")
+    info = shared_files[file_id]
+    mime, _ = mimetypes.guess_type(info["name"])
+    return FileResponse(info["path"], media_type=mime or "application/octet-stream")
+
+
 @app.get("/internal/files/{file_id}")
 async def internal_download_file(file_id: str, from_id: str):
     if from_id not in peers or peers[from_id]["status"] != "trusted":
         raise HTTPException(403, "未建立互信")
+    if peers[from_id].get("trust_level", "high") != "high":
+        raise HTTPException(403, "仅高互信节点可下载文件")
     if file_id not in shared_files:
         raise HTTPException(404, "文件不存在")
     info = shared_files[file_id]
     return FileResponse(
         info["path"],
         media_type="application/octet-stream",
-        headers={"x-filename": info["name"]},
+        headers={"x-filename": quote(info["name"])},
     )
 
 
@@ -456,15 +529,27 @@ def _build_html() -> str:
     .status-trusted     {{ background: #dcfce7; color: #16a34a; }}
     .status-pending-in  {{ background: #fef9c3; color: #b45309; }}
     .status-pending-out {{ background: #dbeafe; color: #1d4ed8; }}
+    .status-rejected    {{ background: #fee2e2; color: #dc2626; }}
+    .trust-high   {{ background: #faf5ff; color: #7c3aed; font-size:11px; font-weight:600;
+                     padding: 2px 8px; border-radius: 20px; white-space:nowrap; }}
+    .trust-normal {{ background: #f1f5f9; color: #475569; font-size:11px; font-weight:600;
+                     padding: 2px 8px; border-radius: 20px; white-space:nowrap; }}
 
     /* Connect form */
-    .connect-row {{ display: flex; gap: 8px; }}
+    .connect-row {{ display: flex; gap: 8px; align-items: center; }}
     .connect-row input {{
       flex: 1; padding: 9px 13px; border: 1px solid #e2e8f0;
       border-radius: 8px; font-size: 14px; outline: none;
       transition: border-color 0.15s;
     }}
     .connect-row input:focus {{ border-color: #4f46e5; }}
+    .connect-row select {{
+      padding: 9px 10px; border: 1px solid #e2e8f0;
+      border-radius: 8px; font-size: 13px; outline: none;
+      background: #fff; color: #1e293b; cursor: pointer;
+      transition: border-color 0.15s;
+    }}
+    .connect-row select:focus {{ border-color: #4f46e5; }}
 
     /* Empty */
     .empty {{ text-align: center; padding: 36px 20px; color: #94a3b8; }}
@@ -632,10 +717,19 @@ def _build_html() -> str:
     <div class="card">
       <div class="card-title">连接新节点</div>
       <div class="connect-row">
-        <input type="text" id="connectInput" placeholder="节点地址，例如 http://localhost:8025"
+        <input type="text" id="connectInput" placeholder="节点地址，例如 http://localhost:8021"
                onkeydown="if(event.key==='Enter') connectPeer()">
+        <select id="trustLevelSelect">
+          <option value="high">🔐 高互信（可浏览+下载）</option>
+          <option value="normal">👁 一般互信（仅浏览）</option>
+        </select>
         <button class="btn btn-primary" onclick="connectPeer()">发起互信</button>
       </div>
+      <textarea id="connectMessage" placeholder="描述信息（选填）：说明身份、用途或请求原因，帮助对方判断是否接受互信…"
+        style="margin-top:10px;width:100%;padding:9px 13px;border:1px solid #e2e8f0;border-radius:8px;
+               font-size:13px;color:#1e293b;resize:vertical;min-height:68px;outline:none;
+               font-family:inherit;transition:border-color 0.15s;"
+        onfocus="this.style.borderColor='#4f46e5'" onblur="this.style.borderColor='#e2e8f0'"></textarea>
     </div>
     <div class="card">
       <div class="card-title">已互信节点</div>
@@ -731,8 +825,13 @@ def _build_html() -> str:
   async function openPreview(rawUrl, fileName, downloadUrl) {{
     document.getElementById('previewTitle').textContent = `👁 ${{fileName}}`;
     const dlBtn = document.getElementById('previewDownloadBtn');
-    dlBtn.href = downloadUrl;
-    dlBtn.download = fileName;
+    if (downloadUrl) {{
+      dlBtn.href = downloadUrl;
+      dlBtn.download = fileName;
+      dlBtn.style.display = 'inline-flex';
+    }} else {{
+      dlBtn.style.display = 'none';
+    }}
     document.getElementById('previewModal').classList.add('open');
 
     const body = document.getElementById('previewBody');
@@ -906,7 +1005,11 @@ def _build_html() -> str:
           <div class="item-meta">${{p.endpoint}}</div>
         </div>
         <span class="status status-trusted">已互信</span>
-        <button class="btn btn-ghost btn-sm" onclick="openBrowse('${{p.id}}','${{p.name}}')">浏览文件</button>
+        <span class="${{p.trust_level === 'high' ? 'trust-high' : 'trust-normal'}}">
+          ${{p.trust_level === 'high' ? '🔐 高互信' : '👁 一般互信'}}
+        </span>
+        <button class="btn btn-ghost btn-sm"
+          onclick="openBrowse('${{p.id}}','${{p.name}}','${{p.trust_level}}')">浏览文件</button>
       </div>`).join('');
   }}
 
@@ -922,11 +1025,23 @@ def _build_html() -> str:
         <div class="item-info">
           <div class="item-name">${{p.name}}</div>
           <div class="item-meta">${{p.endpoint}}</div>
+          ${{p.status === 'pending_in' && p.message ? `
+            <div style="margin-top:6px;padding:7px 10px;background:#f5f3ff;
+                 border-left:3px solid #4f46e5;border-radius:4px;
+                 font-size:12px;color:#475569;line-height:1.6;">
+              ${{p.message}}
+            </div>` : ''}}
         </div>
         ${{p.status === 'pending_in' ? `
+          <span class="${{p.trust_level === 'high' ? 'trust-high' : 'trust-normal'}}">
+            ${{p.trust_level === 'high' ? '🔐 高互信' : '👁 一般互信'}}
+          </span>
           <span class="status status-pending-in">待接受</span>
           <button class="btn btn-success btn-sm" onclick="acceptPeer('${{p.id}}')">接受</button>
           <button class="btn btn-danger btn-sm" onclick="rejectPeer('${{p.id}}')">拒绝</button>
+        ` : p.status === 'rejected' ? `
+          <span class="status status-rejected">对方拒绝建立互信，请重新商量</span>
+          <button class="btn btn-ghost btn-sm" onclick="dismissPeer('${{p.id}}')">知道了</button>
         ` : `
           <span class="status status-pending-out">等待确认</span>
         `}}
@@ -935,11 +1050,14 @@ def _build_html() -> str:
 
   async function connectPeer() {{
     const endpoint = document.getElementById('connectInput').value.trim();
+    const trust_level = document.getElementById('trustLevelSelect').value;
+    const message = document.getElementById('connectMessage').value.trim();
     if (!endpoint) return toast('请输入节点地址', 'err');
     try {{
-      await post('/api/peers/connect', {{endpoint}});
+      await post('/api/peers/connect', {{endpoint, trust_level, message}});
       toast('互信请求已发送，等待对方确认');
       document.getElementById('connectInput').value = '';
+      document.getElementById('connectMessage').value = '';
       await loadPeers();
     }} catch(e) {{ toast(e.message, 'err'); }}
   }}
@@ -960,8 +1078,15 @@ def _build_html() -> str:
     }} catch(e) {{ toast(e.message, 'err'); }}
   }}
 
+  async function dismissPeer(id) {{
+    try {{
+      await del(`/api/peers/${{id}}`);
+      await loadPeers();
+    }} catch(e) {{ toast(e.message, 'err'); }}
+  }}
+
   // ── 浏览节点文件 Modal ────────────────────────────────────────────────────
-  async function openBrowse(peerId, peerName) {{
+  async function openBrowse(peerId, peerName, trustLevel) {{
     browsingPeerId = peerId;
     document.getElementById('browseModalPeerName').textContent = peerName;
     document.getElementById('browseModal').classList.add('open');
@@ -975,6 +1100,7 @@ def _build_html() -> str:
           '<div class="empty"><div class="empty-icon">📭</div><div class="empty-text">该节点暂无共享文件</div></div>';
         return;
       }}
+      const canDownload = trustLevel === 'high';
       document.getElementById('browseBody').innerHTML = files.map(f => `
         <div class="list-item">
           <div class="item-icon icon-file">${{fileIcon(f.name)}}</div>
@@ -982,8 +1108,17 @@ def _build_html() -> str:
             <div class="item-name" title="${{f.name}}">${{f.name}}</div>
             <div class="item-meta">${{fmtSize(f.size)}}</div>
           </div>
-          <button class="btn btn-primary btn-sm" id="fetch-${{f.id}}"
-                  onclick="fetchFile('${{f.id}}','${{f.name}}',this)">获取</button>
+          <div class="item-actions">
+            <button class="btn btn-ghost btn-sm"
+              onclick="openPreview('/api/peers/${{peerId}}/proxy/${{f.id}}','${{f.name}}','')">
+              👁 预览
+            </button>
+            ${{canDownload
+              ? `<button class="btn btn-primary btn-sm" id="fetch-${{f.id}}"
+                         onclick="fetchFile('${{f.id}}','${{f.name}}',this)">获取</button>`
+              : `<span style="font-size:12px;color:#94a3b8;padding:0 4px">仅可浏览</span>`
+            }}
+          </div>
         </div>`).join('');
     }} catch(e) {{
       document.getElementById('browseBody').innerHTML =

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-一键启动 P2P 演示 — 同时运行 Agent-1 (8026) 和 Agent-2 (8025)
+一键启动 P2P 演示 — 同时运行 4 个 Agent 节点
 ================================================================
 用法:
   python demo/start_p2p.py
@@ -16,8 +16,10 @@ import webbrowser
 from pathlib import Path
 
 AGENTS = [
-    {"port": 8026, "name": "Agent-1"},
-    {"port": 8025, "name": "Agent-2"},
+    {"port": 8021, "name": "数据共享方Agent-A"},
+    {"port": 8023, "name": "数据共享方Agent-B"},
+    {"port": 8025, "name": "数据接收方Agent-C"},
+    {"port": 8027, "name": "数据接收方Agent-D"},
 ]
 
 SCRIPT = Path(__file__).parent / "p2p_agent.py"
@@ -67,10 +69,12 @@ def main() -> None:
     print("两个节点已就绪，浏览器标签已自动打开。")
     print()
     print("演示步骤：")
-    print("  1. 在任意节点的「共享文件」Tab 上传文件")
+    print("  1. 在共享方 Agent 的「共享文件」Tab 上传文件")
     print("  2. 在「互信管理」Tab 输入对方地址发起互信")
-    print("     Agent-1 → http://localhost:8025")
-    print("     Agent-2 → http://localhost:8026")
+    print("     数据共享方Agent-A → http://localhost:8021")
+    print("     数据共享方Agent-B → http://localhost:8023")
+    print("     数据接收方Agent-C → http://localhost:8025")
+    print("     数据接收方Agent-D → http://localhost:8027")
     print("  3. 对方页面出现角标，点击「接受」")
     print("  4. 互信建立后点击「浏览文件」→「获取」")
     print()
