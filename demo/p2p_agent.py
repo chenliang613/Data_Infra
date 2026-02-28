@@ -42,6 +42,20 @@ RECEIVED_DIR.mkdir(parents=True, exist_ok=True)
 shared_files: dict[str, dict] = {}
 received_files: list[dict] = []
 peers: dict[str, dict] = {}
+access_log: list[dict] = []
+
+
+def _log_access(event: str, file_name: str, file_id: str, actor: str) -> None:
+    access_log.append({
+        "time": datetime.now().isoformat(),
+        "event": event,
+        "file_name": file_name,
+        "file_id": file_id,
+        "actor": actor,
+    })
+    if len(access_log) > 500:
+        del access_log[0]
+
 
 app = FastAPI(title=AGENT_NAME)
 
@@ -102,6 +116,7 @@ async def raw_shared(file_id: str):
     if file_id not in shared_files:
         raise HTTPException(404, "文件不存在")
     info = shared_files[file_id]
+    _log_access("local_preview", info["name"], file_id, "local")
     mime, _ = mimetypes.guess_type(info["name"])
     return FileResponse(info["path"], media_type=mime or "application/octet-stream")
 
@@ -112,6 +127,7 @@ async def download_shared(file_id: str):
     if file_id not in shared_files:
         raise HTTPException(404, "文件不存在")
     info = shared_files[file_id]
+    _log_access("local_download", info["name"], file_id, "local")
     return FileResponse(
         info["path"],
         filename=info["name"],
@@ -374,6 +390,7 @@ async def internal_preview_file(file_id: str, from_id: str):
     if file_id not in shared_files:
         raise HTTPException(404, "文件不存在")
     info = shared_files[file_id]
+    _log_access("peer_preview", info["name"], file_id, from_id)
     mime, _ = mimetypes.guess_type(info["name"])
     return FileResponse(info["path"], media_type=mime or "application/octet-stream")
 
@@ -387,11 +404,17 @@ async def internal_download_file(file_id: str, from_id: str):
     if file_id not in shared_files:
         raise HTTPException(404, "文件不存在")
     info = shared_files[file_id]
+    _log_access("peer_download", info["name"], file_id, from_id)
     return FileResponse(
         info["path"],
         media_type="application/octet-stream",
         headers={"x-filename": quote(info["name"])},
     )
+
+
+@app.get("/api/access-log")
+async def get_access_log():
+    return list(reversed(access_log))
 
 
 # ── HTML 模板 ──────────────────────────────────────────────────────────────────

@@ -16,13 +16,12 @@ import webbrowser
 from pathlib import Path
 
 AGENTS = [
-    {"port": 8021, "name": "数据共享方Agent-A"},
-    {"port": 8023, "name": "数据共享方Agent-B"},
-    {"port": 8025, "name": "数据接收方Agent-C"},
-    {"port": 8027, "name": "数据接收方Agent-D"},
+    {"port": 8020, "name": "Agent-ALL",         "script": "global_agent.py"},
+    {"port": 8021, "name": "数据共享方Agent-A", "script": "p2p_agent.py"},
+    {"port": 8023, "name": "数据共享方Agent-B", "script": "p2p_agent.py"},
+    {"port": 8025, "name": "数据接收方Agent-C", "script": "p2p_agent.py"},
+    {"port": 8027, "name": "数据接收方Agent-D", "script": "p2p_agent.py"},
 ]
-
-SCRIPT = Path(__file__).parent / "p2p_agent.py"
 
 
 def kill_port(port: int) -> None:
@@ -55,7 +54,8 @@ def main() -> None:
     time.sleep(0.5)
 
     for a in AGENTS:
-        cmd = [sys.executable, str(SCRIPT), "--port", str(a["port"]), "--name", a["name"]]
+        script = Path(__file__).parent / a["script"]
+        cmd = [sys.executable, str(script), "--port", str(a["port"]), "--name", a["name"]]
         p = subprocess.Popen(cmd)
         procs.append(p)
         print(f"  启动 {a['name']}  →  http://localhost:{a['port']}")
@@ -66,17 +66,21 @@ def main() -> None:
     for a in AGENTS:
         webbrowser.open(f"http://localhost:{a['port']}")
 
-    print("两个节点已就绪，浏览器标签已自动打开。")
+    print("所有节点已就绪，浏览器标签已自动打开。")
+    print()
+    print("节点地址：")
+    print("  全局监控 Agent-ALL      → http://localhost:8020")
+    print("  数据共享方 Agent-A      → http://localhost:8021")
+    print("  数据共享方 Agent-B      → http://localhost:8023")
+    print("  数据接收方 Agent-C      → http://localhost:8025")
+    print("  数据接收方 Agent-D      → http://localhost:8027")
     print()
     print("演示步骤：")
     print("  1. 在共享方 Agent 的「共享文件」Tab 上传文件")
     print("  2. 在「互信管理」Tab 输入对方地址发起互信")
-    print("     数据共享方Agent-A → http://localhost:8021")
-    print("     数据共享方Agent-B → http://localhost:8023")
-    print("     数据接收方Agent-C → http://localhost:8025")
-    print("     数据接收方Agent-D → http://localhost:8027")
     print("  3. 对方页面出现角标，点击「接受」")
     print("  4. 互信建立后点击「浏览文件」→「获取」")
+    print("  5. 在 Agent-ALL (8020) 查看全局共享、互信和访问记录")
     print()
     print("按 Ctrl+C 停止所有节点")
     print()

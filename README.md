@@ -6,18 +6,23 @@
 
 ## 快速启动
 
-```bash
-# 安装依赖
-pip install -e .
+### 1. 安装依赖
 
-# 一键启动（自动清理端口、打开浏览器）
+```bash
+pip install -e .
+```
+
+### 2. 启动所有节点
+
+```bash
 python demo/start_p2p.py
 ```
 
-启动后自动打开 4 个浏览器标签：
+启动后自动打开 5 个浏览器标签：
 
 | 节点 | 地址 | 角色 |
 |------|------|------|
+| Agent-ALL（全局监控） | http://localhost:8020 | 监控方 |
 | 数据共享方 Agent-A | http://localhost:8021 | 共享方 |
 | 数据共享方 Agent-B | http://localhost:8023 | 共享方 |
 | 数据接收方 Agent-C | http://localhost:8025 | 接收方 |
@@ -25,10 +30,14 @@ python demo/start_p2p.py
 
 > 启动时会自动终止占用以上端口的进程。
 
-也可单独启动某个节点：
+### 3. 单独启动某个节点（可选）
 
 ```bash
+# 单个 P2P 节点
 python demo/p2p_agent.py --port 8021 --name "我的节点"
+
+# 全局监控节点
+python demo/global_agent.py --port 8020
 ```
 
 ---
