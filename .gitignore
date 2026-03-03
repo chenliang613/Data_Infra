@@ -10,4 +10,5 @@ build/
 data/dataspace.db
 data/keys/*.pem
 data/keys/*.pub
+data/p2p/
 *.log

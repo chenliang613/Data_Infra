@@ -151,7 +151,8 @@ async def download_shared(file_id: str):
 async def delete_shared(file_id: str):
     if file_id not in shared_files:
         raise HTTPException(404, "文件不存在")
-    shared_files.pop(file_id)
+    info = shared_files.pop(file_id)
+    Path(info["path"]).unlink(missing_ok=True)
     return {"ok": True}
 
 
