@@ -14,3 +14,6 @@ dependencies = [
     "httpx>=0.27",
     "python-multipart>=0.0.9",
 ]
+
+[tool.setuptools.packages.find]
+include = ["demo*"]
